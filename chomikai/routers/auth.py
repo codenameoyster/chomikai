@@ -1,29 +1,21 @@
 import logging
 import os
-import secrets
 from typing import Any
 
-import uvicorn
-from fastapi import FastAPI, HTTPException, Request, status
-from fastapi.responses import RedirectResponse
+from fastapi import APIRouter, HTTPException, Request, status
+from fastapi.responses import FileResponse, RedirectResponse
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow  # type: ignore
 from googleapiclient.discovery import build
-from starlette.middleware.sessions import SessionMiddleware
-
-from chomikai.dotenv import load_env_file
+from internal import load_env_file
 
 _log = logging.getLogger(__name__)
 
 # Load environment variables from .env file
 load_env_file(".env")
+FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend")
 
-app = FastAPI(title="Google Slides API Integration")
-
-app.add_middleware(
-    SessionMiddleware,
-    secret_key=secrets.token_urlsafe(32),
-)
+slides_router = APIRouter()
 
 # OAuth2 configuration
 SCOPES = [
@@ -47,6 +39,7 @@ client_config: dict[str, dict[str, Any]] = {
 
 
 def create_flow() -> Flow:
+    _log.debug("Creating OAuth2 flow")
     return Flow.from_client_config(  # type: ignore
         client_config=client_config,
         scopes=SCOPES,
@@ -55,24 +48,34 @@ def create_flow() -> Flow:
 
 
 def get_credentials_from_session(request: Request) -> Any | None:
+    _log.debug("Retrieving credentials from session")
     if "credentials" in request.session:
         return request.session["credentials"]
 
+    _log.warning("No credentials found in session")
     return None
 
 
-@app.get("/")
-async def index() -> dict[str, str]:
-    return {
-        "message": "Welcome to the Google Slides API Integration!",
-        "authenticate": "visit /login",
-    }
+@slides_router.get("/")
+async def index():
+    _log.debug("Index route accessed")
+    login_page = os.path.join(FRONTEND_DIR, "login.html")
+    if os.path.exists(login_page):
+        return FileResponse(login_page)
+    else:
+        return {
+            "message": "Welcome to the Google Slides API Integration!",
+            "authenticate": "visit /login",
+        }
 
 
-@app.get("/login")
+@slides_router.get("/login")
 async def login(request: Request):
+    _log.debug("Login route accessed")
     flow = create_flow()
     authorization_url, state = flow.authorization_url(  # type: ignore
+        # Recommended, enable offline access so that you can refresh an access token without
+        # re-prompting the user for permission. Recommended for web server apps.
         access_type="offline",
         prompt="consent",
         include_granted_scopes="true",
@@ -83,10 +86,11 @@ async def login(request: Request):
     return RedirectResponse(url=authorization_url)
 
 
-@app.get("/oauth2callback")
+@slides_router.get("/oauth2callback")
 async def oauth2_callback(
     request: Request, code: str = "", state: str = "", error: str = ""
 ):
+    _log.debug("OAuth2 callback route accessed")
     if len(error) > 0:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=error)
 
@@ -110,8 +114,10 @@ async def oauth2_callback(
     return RedirectResponse(url="/presentations")
 
 
-@app.get("/presentations")
+@slides_router.get("/presentations")
 async def list_presentations(request: Request):
+    _log.debug("Presentations route accessed")
+
     credentials_dict = get_credentials_from_session(request)
     if not credentials_dict:
         # Redirect to login if not authenticated
@@ -152,13 +158,8 @@ async def list_presentations(request: Request):
     return presentations
 
 
-@app.get("/logout")
+@slides_router.get("/logout")
 async def logout(request: Request):
     """Clear the session and log out the user."""
     request.session.clear()
     return {"message": "Successfully logged out"}
-
-
-# Run the application
-if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
