@@ -3,7 +3,7 @@ import os
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, status
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow  # type: ignore
 from googleapiclient.discovery import build
@@ -61,7 +61,7 @@ async def index():
     _log.debug("Index route accessed")
     login_page = os.path.join(FRONTEND_DIR, "login.html")
     if os.path.exists(login_page):
-        return FileResponse(login_page)
+        return HTMLResponse(login_page)
     else:
         return {
             "message": "Welcome to the Google Slides API Integration!",
