@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Presentations</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            margin: 20px;
+            background-color: #f4f4f4;
+        }
+        h1 {
+            text-align: center;
+            color: #333;
+        }
+        .presentations-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); /* Responsive grid */
+            gap: 20px; /* Spacing between items */
+            padding: 20px;
+            max-width: 1200px; /* Max width of the grid */
+            margin: 0 auto; /* Center the grid */
+        }
+        .presentation-item {
+            background-color: #fff;
+            border-radius: 8px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+            overflow: hidden; /* Ensure content fits */
+            text-decoration: none; /* Remove underline from link */
+            color: inherit; /* Inherit text color */
+            display: flex;
+            flex-direction: column;
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+        }
+        .presentation-item:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 4px 10px rgba(0,0,0,0.15);
+        }
+        .thumbnail-container {
+            width: 100%;
+            padding-top: 56.25%; /* 16:9 Aspect Ratio */
+            position: relative;
+            background-color: #eee; /* Placeholder color */
+        }
+        .thumbnail {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover; /* Cover the area */
+        }
+        .presentation-info {
+            padding: 10px;
+            text-align: center;
+        }
+        .presentation-name {
+            font-size: 0.9em;
+            font-weight: bold;
+            margin-bottom: 5px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .presentation-dates {
+            font-size: 0.75em;
+            color: #666;
+        }
+        .logout-button {
+            position: fixed;
+            top: 15px;
+            right: 15px;
+            padding: 8px 15px;
+            font-size: 14px;
+            cursor: pointer;
+            text-decoration: none;
+            color: white;
+            background-color: #d9534f; /* Red color for logout */
+            border: none;
+            border-radius: 4px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+            transition: background-color 0.3s ease;
+        }
+        .logout-button:hover {
+            background-color: #c9302c; /* Darker red */
+        }
+    </style>
+</head>
+<body>
+    <h1>Your Google Slides Presentations</h1>
+    <a href="/logout" class="logout-button">Logout</a>
+    <div class="presentations-grid">
+        {% for presentation in presentations %}
+        <a href="{{ presentation.webViewLink }}" target="_blank" class="presentation-item">
+            <div class="thumbnail-container">
+                {% if presentation.thumbnailUrl %}
+                <img src="{{ presentation.thumbnailUrl }}" alt="{{ presentation.name }} thumbnail" class="thumbnail">
+                {% else %}
+                 <!-- Optional: Placeholder if no thumbnail -->
+                 <div style="display: flex; align-items: center; justify-content: center; height: 100%; color: #aaa;">No Thumbnail</div>
+                {% endif %}
+            </div>
+            <div class="presentation-info">
+                <div class="presentation-name" title="{{ presentation.name }}">{{ presentation.name }}</div>
+                <div class="presentation-dates">
+                    Modified: {{ presentation.modifiedTime[:10] }} <!-- Display only date part -->
+                </div>
+            </div>
+        </a>
+        {% endfor %}
+    </div>
+</body>
+</html>

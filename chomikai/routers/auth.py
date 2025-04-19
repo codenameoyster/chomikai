@@ -2,11 +2,13 @@ import logging
 import os
 from typing import Any
 
+import typing_extensions
 from fastapi import APIRouter, HTTPException, Request, status
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.templating import Jinja2Templates
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow  # type: ignore
-from googleapiclient.discovery import build
+from googleapiclient.discovery import build  # type: ignore
 from internal import load_env_file
 
 _log = logging.getLogger(__name__)
@@ -14,6 +16,8 @@ _log = logging.getLogger(__name__)
 # Load environment variables from .env file
 load_env_file(".env")
 FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend")
+# Configure Jinja2Templates
+templates = Jinja2Templates(directory=FRONTEND_DIR)
 
 slides_router = APIRouter()
 
@@ -61,7 +65,7 @@ async def index():
     _log.debug("Index route accessed")
     login_page = os.path.join(FRONTEND_DIR, "login.html")
     if os.path.exists(login_page):
-        return HTMLResponse(login_page)
+        return FileResponse(login_page)
     else:
         return {
             "message": "Welcome to the Google Slides API Integration!",
@@ -114,7 +118,9 @@ async def oauth2_callback(
     return RedirectResponse(url="/presentations")
 
 
-@slides_router.get("/presentations")
+@slides_router.get(
+    "/presentations", response_class=HTMLResponse
+)  # Change response_class
 async def list_presentations(request: Request):
     _log.debug("Presentations route accessed")
 
@@ -132,30 +138,76 @@ async def list_presentations(request: Request):
         scopes=credentials_dict["scopes"],
     )
     drive_service = build("drive", "v3", credentials=credentials)
+    slides_service = build(
+        "slides", "v1", credentials=credentials
+    )  # Re-enable slides service
+
     # Query for all presentations
     query = "mimeType='application/vnd.google-apps.presentation'"
 
-    presentations: list[Any] = []
-    page_token: str = ""
+    presentations_data: list[Any] = []
+    page_token: str | None = None
 
     while True:
-        response = (
-            drive_service.files()
-            .list(
-                q=query,
-                spaces="drive",
-                fields="nextPageToken, files(id, name, createdTime, modifiedTime, webViewLink)",
-                pageToken=page_token,
-            )
-            .execute()
+        list_request = drive_service.files().list(
+            q=query,
+            spaces="drive",
+            fields="nextPageToken, files(id, name, createdTime, modifiedTime, webViewLink)",  # Removed thumbnailLink from Drive API call
+            pageToken=page_token,
         )
+        response = list_request.execute()
 
-        presentations.extend(response.get("files", []))
-        page_token = response.get("nextPageToken", "")
-        if page_token == "":
+        files: list[Any] = response.get("files", [])
+
+        # Fetch thumbnail for each presentation using Slides API
+        for file in files:
+            presentation_id = file.get("id")
+            if presentation_id:
+                try:
+                    presentation = (
+                        slides_service.presentations()
+                        .get(presentationId=presentation_id, fields="slides(objectId)")
+                        .execute()
+                    )
+                    first_slide_id = presentation.get("slides", [{}])[0].get("objectId")
+
+                    if first_slide_id:
+                        thumbnail_response = (
+                            slides_service.presentations()
+                            .pages()
+                            .getThumbnail(
+                                presentationId=presentation_id,
+                                pageObjectId=first_slide_id,
+                                thumbnailProperties_thumbnailSize="MEDIUM",  # Options: SMALL, MEDIUM, LARGE
+                            )
+                            .execute()
+                        )
+                        # thumbnailUrl used in the HTML template
+                        # https://googleapis.github.io/google-api-python-client/docs/dyn/slides_v1.presentations.html - contentUrl
+                        file["thumbnailUrl"] = thumbnail_response.get("contentUrl")
+                    else:
+                        file["thumbnailUrl"] = None  # No first slide found
+                        _log.warning(
+                            f"Could not find first slide ID for presentation {presentation_id}"
+                        )
+
+                except Exception as e:
+                    _log.error(
+                        f"Error fetching thumbnail for presentation {presentation_id}: {e}"
+                    )
+                    file["thumbnailUrl"] = None  # Set to None on error
+            else:
+                file["thumbnailUrl"] = None
+
+        presentations_data.extend(files)
+        page_token = response.get("nextPageToken")
+        if not page_token:
             break
 
-    return presentations
+    # Render the HTML template with the presentations data
+    return templates.TemplateResponse(
+        "presentations.html", {"request": request, "presentations": presentations_data}
+    )
 
 
 @slides_router.get("/logout")
