@@ -1,6 +1,8 @@
 # chomikai
 
-MCP tool to connect Google Slides to AI (supporting MCP)
+![Chomikai](chomikai.png)
+
+Simple AI tool to connect Google Slides to AI (supporting MCP/A2A)
 
 ## Resources
 

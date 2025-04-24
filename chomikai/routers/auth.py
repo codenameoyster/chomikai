@@ -1,10 +1,12 @@
+import json
 import logging
 import os
+from collections.abc import AsyncGenerator
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
-from typing import Any
+from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException, Request, status
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi import APIRouter, HTTPException, Request, Response, status
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
@@ -16,7 +18,6 @@ _log = logging.getLogger(__name__)
 # Load environment variables from .env file
 load_env_file(".env")
 FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend")
-# Configure Jinja2Templates
 templates = Jinja2Templates(directory=FRONTEND_DIR)
 
 slides_router = APIRouter()
@@ -74,7 +75,7 @@ async def index():
 
 
 @slides_router.get("/login")
-async def login(request: Request):
+async def login(request: Request) -> Response:
     _log.debug("Login route accessed")
     flow = create_flow()
     # Returns:
@@ -100,7 +101,7 @@ async def login(request: Request):
 @slides_router.get("/oauth2callback")
 async def oauth2_callback(
     request: Request, code: str = "", state: str = "", error: str = ""
-):
+) -> Response:
     _log.debug("OAuth2 callback route accessed")
     if len(error) > 0:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=error)
@@ -133,6 +134,7 @@ def _fetch_thumbnail(file_data: dict[str, Any], credentials: Credentials) -> Non
     presentation_id = file_data.get("id")
     _log.debug(f"Processing presentation ID: {presentation_id}")
     if not presentation_id:
+        _log.debug("No presentation ID found in file data")
         file_data["thumbnailUrl"] = None
         return None
 
@@ -164,6 +166,9 @@ def _fetch_thumbnail(file_data: dict[str, Any], credentials: Credentials) -> Non
             # thumbnailUrl used in the HTML template
             # https://googleapis.github.io/google-api-python-client/docs/dyn/slides_v1.presentations.html - contentUrl
             file_data["thumbnailUrl"] = thumbnail_response.get("contentUrl")
+            _log.debug(
+                f"Thumbnail URL for presentation {presentation_id}: {file_data['thumbnailUrl']}"
+            )
         else:
             file_data["thumbnailUrl"] = None  # No first slide found
             _log.warning(
@@ -175,74 +180,150 @@ def _fetch_thumbnail(file_data: dict[str, Any], credentials: Credentials) -> Non
         file_data["thumbnailUrl"] = None  # Set to None on error
 
 
-@slides_router.get(
-    "/presentations", response_class=HTMLResponse
-)  # Change response_class
-async def list_presentations(request: Request):
-    _log.debug("Presentations route accessed")
+@slides_router.get("/presentations")
+async def list_presentations(
+    request: Request,
+) -> Response:
+    _log.debug("Presentations route accessed for SSE")
 
     credentials_dict = get_credentials_from_session(request)
     if not credentials_dict:
         # Redirect to login if not authenticated
         return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
 
-    credentials = Credentials(
-        token=credentials_dict["token"],
-        refresh_token=credentials_dict["refresh_token"],
-        token_uri=credentials_dict["token_uri"],
-        client_id=credentials_dict["client_id"],
-        client_secret=credentials_dict["client_secret"],
-        scopes=credentials_dict["scopes"],
-    )
-    drive_service = build("drive", "v3", credentials=credentials, cache_discovery=False)
+    # Check if the request accepts text/event-stream, otherwise serve the initial page
+    accept_header = request.headers.get("accept", "")
+    if "text/event-stream" not in accept_header:
+        _log.debug("Serving initial progress HTML page")
+        progress_page = os.path.join(FRONTEND_DIR, "progress.html")
+        if os.path.exists(progress_page):
+            return FileResponse(progress_page)
+        else:
+            raise HTTPException(status_code=404, detail="Progress page not found")
 
-    # Query for all presentations
-    # https://developers.google.com/workspace/drive/api/guides/mime-types
-    query = "mimeType='application/vnd.google-apps.presentation'"
+    # This part runs only if 'text/event-stream' IS in the accept header
+    async def event_stream() -> AsyncGenerator[str, None]:
+        _log.debug("Starting SSE stream")
+        try:
+            credentials = Credentials(
+                token=credentials_dict["token"],
+                refresh_token=credentials_dict["refresh_token"],
+                token_uri=credentials_dict["token_uri"],
+                client_id=credentials_dict["client_id"],
+                client_secret=credentials_dict["client_secret"],
+                scopes=credentials_dict["scopes"],
+            )
+            drive_service = build(
+                "drive", "v3", credentials=credentials, cache_discovery=False
+            )
 
-    presentations_data: list[Any] = []
+            # Query for all presentations
+            # https://developers.google.com/workspace/drive/api/guides/mime-types
+            query = "mimeType='application/vnd.google-apps.presentation'"
+            presentations_data: list[Any] = []
 
-    # Fetch presentations from Drive API
-    # we're not using pagination here (nextPageToken) because we fetch up to 1000 files
-    list_request = drive_service.files().list(
-        q=query,
-        spaces="drive",
-        fields="files(id, name, createdTime, modifiedTime, webViewLink)",
-        pageSize=1000,
-    )
-    response = list_request.execute()
+            # Fetch presentations from Drive API
+            # we're not using pagination here (nextPageToken) because we fetch up to 1000 files
+            list_request = drive_service.files().list(
+                q=query,
+                spaces="drive",
+                fields="files(id, name, createdTime, modifiedTime, webViewLink)",
+                pageSize=1000,  # Consider pagination for very large numbers
+            )
+            response = list_request.execute()
+            _log.debug(f"Drive API response: {response}")
+            files: list[Any] = response.get("files", [])
+            total_files = len(files)
+            processed_files = 0
 
-    _log.debug(f"Drive API response: {response}")
-
-    files: list[Any] = response.get("files", [])
-
-    with ThreadPoolExecutor(max_workers=15) as executor:
-        futures: dict[Future[None], Any] = {
-            executor.submit(_fetch_thumbnail, file_data, credentials): file_data
-            for file_data in files
-        }
-
-        for future_result in as_completed(futures):
-            try:
-                future_result.result()
-            except Exception as exc:
-                file_data = futures[future_result]
-                _log.error(
-                    f"Fetching thumbnail for file {file_data.get('id')} generated an exception: {exc}"
+            if total_files == 0:
+                # Send initial progress if no files
+                progress_data = json.dumps({"percent": 100, "processed": 0, "total": 0})
+                yield f"event: progress\ndata: {progress_data}\n\n"
+            else:
+                # Send initial 0% progress
+                progress_data = json.dumps(
+                    {"percent": 0, "processed": 0, "total": total_files}
                 )
-                if "thumbnailUrl" not in file_data:
-                    file_data["thumbnailUrl"] = None
+                yield f"event: progress\ndata: {progress_data}\n\n"
 
-    presentations_data.extend(files)
+            with ThreadPoolExecutor(max_workers=15) as executor:
+                # Check if there are files before submitting to executor
+                if files:
+                    futures: dict[Future[None], Any] = {
+                        executor.submit(
+                            _fetch_thumbnail, file_data, credentials
+                        ): file_data
+                        for file_data in files
+                    }
 
-    # Render the HTML template with the presentations data
-    return templates.TemplateResponse(
-        "presentations.html", {"request": request, "presentations": presentations_data}
-    )
+                    # Iterate over the futures as they complete
+                    for future_result in as_completed(futures):
+                        processed_files += 1
+                        try:
+                            # Get the result of the future. This will re-raise any exception
+                            # that occurred during the execution of _fetch_thumbnail.
+                            future_result.result()  # Wait for thumbnail fetch to complete
+                        except Exception as exc:
+                            # Handle exceptions from _fetch_thumbnail
+                            file_data = futures[future_result]
+                            _log.error(
+                                f"Fetching thumbnail for file {file_data.get('id')} generated an exception: {exc}"
+                            )
+                            # Ensure thumbnailUrl is set even if fetching failed
+                            if "thumbnailUrl" not in file_data:
+                                _log.warning(
+                                    f"No thumbnail in the file_data {file_data.get('id')}"
+                                )
+                                file_data["thumbnailUrl"] = None
+                        finally:
+                            # Send progress update via SSE regardless of success or failure
+                            percent: float | Literal[100] = (
+                                (processed_files / total_files) * 100
+                                if total_files > 0
+                                else 100
+                            )
+                            progress_data = json.dumps(
+                                {
+                                    "percent": percent,
+                                    "processed": processed_files,
+                                    "total": total_files,
+                                }
+                            )
+                            _log.debug(f"Sending progress: {progress_data}")
+                            yield f"event: progress\ndata: {progress_data}\n\n"
+
+            # All thumbnails processed (or no files to process)
+            _log.debug(f"All thumbnails processed: data {files}")
+            presentations_data.extend(files)
+
+            # Render the final HTML content
+            # Note: Using the template rendering within the async generator
+            # TemplateResponse.body is already bytes, no need to decode
+            final_html_bytes: bytes | memoryview[int] = templates.TemplateResponse(
+                "presentations.html",
+                {"request": request, "presentations": presentations_data},
+            ).body
+            final_html: str | Any = final_html_bytes.decode("utf-8")
+
+            # Send the complete event with the final HTML
+            complete_data = json.dumps({"html": final_html})
+            _log.debug("Sending complete event")
+            yield f"event: complete\ndata: {complete_data}\n\n"
+
+        except Exception as e:
+            _log.error(f"Error during SSE stream: {e}", exc_info=True)
+            error_data = json.dumps({"message": f"An error occurred: {e}"})
+            yield f"event: error\ndata: {error_data}\n\n"  # Send an error event to the client
+        finally:
+            _log.debug("SSE stream finished")
+
+    # Return the streaming response (This is outside the 'if' block)
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @slides_router.get("/logout")
-async def logout(request: Request):
+async def logout(request: Request) -> dict[str, str]:
     """Clear the session and log out the user."""
     request.session.clear()
     return {"message": "Successfully logged out"}
