@@ -1,3 +1,38 @@
+"""
+Google Slides Authentication and Presentation Management Router.
+
+This module provides FastAPI routes for Google OAuth2 authentication and Google Slides
+presentation management. It handles the complete OAuth2 flow, session management,
+and provides endpoints for listing and displaying Google Slides presentations with
+real-time progress updates using Server-Sent Events (SSE).
+
+Key Features:
+- Google OAuth2 authentication flow
+- Session-based credential storage
+- Google Slides API integration
+- Real-time thumbnail generation with progress tracking
+- Server-Sent Events for live updates
+- Thread-based concurrent thumbnail fetching
+
+Routes:
+- GET /: Landing/index page
+- GET /login: Initiate OAuth2 authentication
+- GET /oauth2callback: Handle OAuth2 callback
+- GET /presentations: List presentations with SSE progress
+- GET /logout: Clear session and logout
+
+Environment Variables Required:
+- GOOGLE_CLIENT_ID: Google OAuth2 client ID
+- GOOGLE_CLIENT_SECRET: Google OAuth2 client secret
+- GOOGLE_PROJECT_ID: Google Cloud project ID
+
+Dependencies:
+- FastAPI for web framework
+- Google Auth libraries for OAuth2
+- Google API client for Slides/Drive APIs
+- Jinja2 for HTML templating
+"""
+
 import json
 import logging
 import os
@@ -11,7 +46,7 @@ from fastapi.templating import Jinja2Templates
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
-from internal import load_env_file
+from chomikai.internal import load_env_file
 
 _log = logging.getLogger(__name__)
 
@@ -44,6 +79,13 @@ client_config: dict[str, dict[str, Any]] = {
 
 
 def create_flow() -> Flow:
+    """
+    Create a new OAuth2 flow instance for Google authentication.
+
+    Returns:
+        Flow: Configured OAuth2 flow instance with client credentials,
+              scopes, and redirect URI for Google API access.
+    """
     _log.debug("Creating OAuth2 flow")
     return Flow.from_client_config(  # type: ignore
         client_config=client_config,
@@ -53,6 +95,16 @@ def create_flow() -> Flow:
 
 
 def get_credentials_from_session(request: Request) -> Any | None:
+    """
+    Retrieve OAuth2 credentials from the user's session.
+
+    Args:
+        request: FastAPI Request object containing session data.
+
+    Returns:
+        dict | None: Dictionary containing OAuth2 credentials if found in session,
+                     None if no credentials are stored.
+    """
     _log.debug("Retrieving credentials from session")
     if "credentials" in request.session:
         return request.session["credentials"]
@@ -63,6 +115,13 @@ def get_credentials_from_session(request: Request) -> Any | None:
 
 @slides_router.get("/")
 async def index():
+    """
+    Root endpoint that serves the login page or welcome message.
+
+    Returns:
+        FileResponse | dict: Login HTML page if it exists, otherwise
+                            a JSON response with welcome message and login instructions.
+    """
     _log.debug("Index route accessed")
     login_page = os.path.join(FRONTEND_DIR, "login.html")
     if os.path.exists(login_page):
@@ -76,6 +135,19 @@ async def index():
 
 @slides_router.get("/login")
 async def login(request: Request) -> Response:
+    """
+    Initiate the Google OAuth2 authentication flow.
+
+    This endpoint generates an authorization URL for Google OAuth2 and redirects
+    the user to Google's authentication page. The state parameter is stored in
+    the session for security verification during the callback.
+
+    Args:
+        request: FastAPI Request object to access and store session data.
+
+    Returns:
+        RedirectResponse: Redirect to Google's OAuth2 authorization URL.
+    """
     _log.debug("Login route accessed")
     flow = create_flow()
     # Returns:
@@ -102,6 +174,25 @@ async def login(request: Request) -> Response:
 async def oauth2_callback(
     request: Request, code: str = "", state: str = "", error: str = ""
 ) -> Response:
+    """
+    Handle the OAuth2 callback from Google's authorization server.
+
+    This endpoint processes the callback from Google OAuth2, validates the state
+    parameter for security, exchanges the authorization code for access tokens,
+    and stores the credentials in the session.
+
+    Args:
+        request: FastAPI Request object to access and store session data.
+        code: Authorization code returned by Google OAuth2 server.
+        state: State parameter for CSRF protection.
+        error: Error message if authorization failed.
+
+    Returns:
+        RedirectResponse: Redirect to presentations page on success.
+
+    Raises:
+        HTTPException: If error parameter is present or state validation fails.
+    """
     _log.debug("OAuth2 callback route accessed")
     if len(error) > 0:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=error)
@@ -127,6 +218,22 @@ async def oauth2_callback(
 
 
 def _fetch_thumbnail(file_data: dict[str, Any], credentials: Credentials) -> None:
+    """
+    Fetch thumbnail URL for a Google Slides presentation.
+
+    This function retrieves the thumbnail image URL for the first slide of a
+    presentation using the Google Slides API. The thumbnail URL is added to
+    the file_data dictionary for use in the HTML template.
+
+    Args:
+        file_data: Dictionary containing presentation metadata from Drive API.
+                  Will be modified in-place to add 'thumbnailUrl' field.
+        credentials: Google OAuth2 credentials for API access.
+
+    Note:
+        This function modifies file_data in-place, adding a 'thumbnailUrl' field.
+        If thumbnail generation fails, 'thumbnailUrl' will be set to None.
+    """
     slides_service = build(
         "slides", "v1", credentials=credentials, cache_discovery=False
     )
@@ -184,6 +291,34 @@ def _fetch_thumbnail(file_data: dict[str, Any], credentials: Credentials) -> Non
 async def list_presentations(
     request: Request,
 ) -> Response:
+    """
+    List Google Slides presentations with real-time progress updates.
+
+    This endpoint serves two purposes based on the request's Accept header:
+
+    1. If Accept header doesn't include 'text/event-stream': Returns the initial
+       progress HTML page to display loading UI.
+
+    2. If Accept header includes 'text/event-stream': Returns a Server-Sent Events
+       stream that provides real-time progress updates while fetching presentation
+       thumbnails concurrently, followed by the final HTML with all presentations.
+
+    The SSE stream sends three types of events:
+    - 'progress': Updates with percentage, processed count, and total count
+    - 'complete': Final HTML content with all presentations and thumbnails
+    - 'error': Error messages if something goes wrong
+
+    Args:
+        request: FastAPI Request object for session access and content negotiation.
+
+    Returns:
+        Response: Either a FileResponse for the progress page or a StreamingResponse
+                 with Server-Sent Events containing progress updates and final HTML.
+
+    Raises:
+        HTTPException: If user is not authenticated (redirects to login) or
+                      if progress page is not found.
+    """
     _log.debug("Presentations route accessed for SSE")
 
     credentials_dict = get_credentials_from_session(request)
@@ -324,6 +459,17 @@ async def list_presentations(
 
 @slides_router.get("/logout")
 async def logout(request: Request) -> dict[str, str]:
-    """Clear the session and log out the user."""
+    """
+    Clear the user's session and log them out.
+
+    This endpoint removes all stored credentials and session data,
+    effectively logging the user out of the application.
+
+    Args:
+        request: FastAPI Request object to access session data.
+
+    Returns:
+        dict[str, str]: Success message confirming logout.
+    """
     request.session.clear()
     return {"message": "Successfully logged out"}

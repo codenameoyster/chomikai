@@ -1,3 +1,34 @@
+"""
+ChomiKAI - Google Slides Integration Application.
+
+This is the main FastAPI application that provides a web interface for Google Slides
+authentication and presentation management. The application serves as a bridge between
+users and Google's APIs, offering real-time presentation listing with thumbnails.
+
+Key Features:
+- FastAPI web framework with async support
+- Google OAuth2 authentication flow
+- Session-based credential management
+- CORS middleware for cross-origin requests
+- Real-time progress updates via Server-Sent Events
+- Google Slides and Drive API integration
+
+The application includes:
+- Authentication routes for Google OAuth2
+- Presentation listing with thumbnail generation
+- Session management for user credentials
+- Static file serving for frontend assets
+
+Usage:
+    Run directly: python main.py
+    Or with uvicorn: uvicorn main:app --reload
+
+Environment Requirements:
+- GOOGLE_CLIENT_ID: Google OAuth2 client ID
+- GOOGLE_CLIENT_SECRET: Google OAuth2 client secret
+- GOOGLE_PROJECT_ID: Google Cloud project ID
+"""
+
 import logging
 import secrets
 
