@@ -3,7 +3,7 @@ Environment variable loading utilities.
 
 This module provides functionality to load environment variables from .env files,
 which is essential for managing configuration in the ChomiKAI application.
-The loader supports basic .env file format with key=value pairs and handles
+The loader supports a basic .env file format with key=value pairs and handles
 comments and empty lines appropriately.
 
 Features:
@@ -22,7 +22,7 @@ _log = logging.getLogger(__name__)
 
 def load_env_file(env_path: str = ".env") -> None:
     """
-    Load environment variables from a .env file.
+    Load environment variables from an .env file.
 
     Reads a .env file and loads all key=value pairs into the environment.
     Lines starting with # are treated as comments and ignored. Empty lines
